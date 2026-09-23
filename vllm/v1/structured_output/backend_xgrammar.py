@@ -241,47 +241,33 @@ STRING_SUPPORTED_FORMATS = {
 }
 
 
-def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
-    return ("pattern" in schema or "format" in schema) and (
-        "minLength" in schema or "maxLength" in schema
-    )
-
-
-# FIXME(arpera): The approach used here needs to be redesigned because of
-# existing bugs: https://github.com/vllm-project/vllm/issues/57550
-def _schema_types(schema: dict[str, Any]) -> set[str]:
-    """Normalize a scalar or list-valued JSON Schema type."""
-    schema_type = schema.get("type")
-    if isinstance(schema_type, str):
-        return {schema_type}
-    if isinstance(schema_type, list):
-        return {item for item in schema_type if isinstance(item, str)}
-    return set()
-
-
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
     def check_object(node: GeneralSchema) -> bool:
-        obj = node.values
-        schema_types = _schema_types(obj)
+        numeric = node.numeric
+        string = node.string
+        array = node.array
+        object_view = node.object
 
         # Check for numeric ranges
-        if (schema_types & {"integer", "number"}) and node.has_keyword("multipleOf"):
+        if numeric.may_apply and numeric.has_multiple_of:
             return True
 
         # Check for array unsupported keywords
-        if "array" in schema_types and any(
-            node.has_keyword(key)
-            for key in ("uniqueItems", "contains", "minContains", "maxContains")
+        if array.may_apply and (
+            array.has_unique_items
+            or array.contains is not None
+            or array.has_min_contains
+            or array.has_max_contains
         ):
             return True
 
         # Unsupported keywords for strings
         if (
-            "string" in schema_types
-            and node.has_keyword("format")
-            and obj["format"] not in STRING_SUPPORTED_FORMATS
+            string.may_apply
+            and string.has_format
+            and string.format not in STRING_SUPPORTED_FORMATS
         ):
             return True
 
@@ -292,30 +278,34 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
-        if "string" in schema_types and _has_pattern_and_length_bounds(obj):
+        if (
+            string.may_apply
+            and (string.has_pattern or string.has_format)
+            and string.has_length_bounds
+        ):
             return True
 
-        # propertyNames validates names, so it is a string schema even when it
-        # omits "type", which is the form that escapes the check above.
-        property_names = node.subschemas.get("propertyNames")
+        # propertyNames validates names, so its schema may omit "type".
+        property_names = object_view.property_names
         if (
-            "object" in schema_types
+            object_view.may_apply
             and isinstance(property_names, GeneralSchema)
-            and _has_pattern_and_length_bounds(property_names.values)
+            and (property_names.string.has_pattern or property_names.string.has_format)
+            and property_names.string.has_length_bounds
         ):
             return True
 
         # FIXME: propertyNames conflicts with properties/patternProperties/
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
-        additional_properties = node.subschemas.get("additionalProperties")
-        unevaluated_properties = node.subschemas.get("unevaluatedProperties")
+        additional_properties = object_view.additional_properties
+        unevaluated_properties = object_view.unevaluated_properties
         if (
-            "object" in schema_types
-            and node.has_keyword("propertyNames")
+            object_view.may_apply
+            and property_names is not None
             and (
-                node.has_keyword("properties")
-                or node.has_keyword("patternProperties")
+                object_view.properties is not None
+                or object_view.pattern_properties is not None
                 or isinstance(additional_properties, GeneralSchema)
                 or (
                     unevaluated_properties is not None
@@ -330,11 +320,11 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # FIXME: multiple patternProperties, or patternProperties alongside
         # properties, conflict under xgrammar.
-        pattern_properties = node.subschemas.get("patternProperties")
+        pattern_properties = object_view.pattern_properties
         return (
-            "object" in schema_types
-            and isinstance(pattern_properties, dict)
-            and (node.has_keyword("properties") or len(pattern_properties) > 1)
+            object_view.may_apply
+            and pattern_properties is not None
+            and (object_view.properties is not None or len(pattern_properties) > 1)
         )
 
     document = SchemaDocument.parse(schema)

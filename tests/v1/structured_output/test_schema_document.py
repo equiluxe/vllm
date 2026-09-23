@@ -85,12 +85,29 @@ def test_type_views_do_not_insert_a_type():
 
     assert isinstance(root, GeneralSchema)
     assert root.explicit_types() is None
-    assert root.may_be_string()
-    assert root.string_assertions() == schema
+    assert root.string.may_apply
+    assert root.string.has_pattern
+    assert root.string.has_length_bounds
     assert document.export() == schema
     integer_root = SchemaDocument.parse({"type": "integer"}).root
     assert isinstance(integer_root, GeneralSchema)
-    assert not integer_root.may_be_string()
+    assert integer_root.numeric.may_apply
+    assert not integer_root.string.may_apply
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"multipleOf": 2},
+        {"type": ["null", "number"], "multipleOf": 2},
+        {"uniqueItems": True},
+        {"format": "made-up-format"},
+        {"pattern": "^a$", "maxLength": 1},
+        {"propertyNames": {"pattern": "^a$", "maxLength": 1}},
+    ],
+)
+def test_xgrammar_check_uses_type_views_for_applicable_constraints(schema):
+    assert has_xgrammar_unsupported_json_features(schema)
 
 
 def test_xgrammar_check_ignores_literal_data_and_unused_definitions():

@@ -42,7 +42,7 @@ def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by guidance/llguidance."""
     document = SchemaDocument.parse(schema)
     return any(
-        isinstance(node, GeneralSchema) and node.has_keyword("patternProperties")
+        isinstance(node, GeneralSchema) and node.object.pattern_properties is not None
         for _, node in document.walk_potential_constraints()
     )
 
@@ -56,8 +56,10 @@ def process_for_additional_properties(
         guide_json_obj = guide_json
 
     def close_object_schema(node: GeneralSchema) -> None:
-        if not node.has_keyword("additionalProperties") and (
-            "properties" in node.subschemas or "patternProperties" in node.subschemas
+        object_view = node.object
+        if object_view.additional_properties is None and (
+            object_view.properties is not None
+            or object_view.pattern_properties is not None
         ):
             node.add_subschema("additionalProperties", BoolSchema(False))
 

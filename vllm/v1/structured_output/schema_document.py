@@ -3,6 +3,8 @@
 
 """Non-merge prototype of a shared JSON Schema document for design review."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Iterable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -17,6 +19,40 @@ class IncompleteSchemaAnalysis(Exception):
 @dataclass
 class BoolSchema:
     value: bool
+
+
+@dataclass(frozen=True)
+class NumericView:
+    may_apply: bool
+    has_multiple_of: bool
+
+
+@dataclass(frozen=True)
+class StringView:
+    may_apply: bool
+    has_pattern: bool
+    has_format: bool
+    format: Any
+    has_length_bounds: bool
+
+
+@dataclass(frozen=True)
+class ArrayView:
+    may_apply: bool
+    has_unique_items: bool
+    contains: SchemaNode | None
+    has_min_contains: bool
+    has_max_contains: bool
+
+
+@dataclass(frozen=True)
+class ObjectView:
+    may_apply: bool
+    properties: dict[str, SchemaNode] | None
+    pattern_properties: dict[str, SchemaNode] | None
+    property_names: SchemaNode | None
+    additional_properties: SchemaNode | None
+    unevaluated_properties: SchemaNode | None
 
 
 @dataclass
@@ -40,18 +76,49 @@ class GeneralSchema:
             return set(schema_type)
         raise IncompleteSchemaAnalysis("invalid type keyword")
 
-    def may_be_string(self) -> bool:
+    def _may_apply_to(self, *types_to_check: str) -> bool:
         types = self.explicit_types()
-        return types is None or "string" in types
+        return types is None or bool(types.intersection(types_to_check))
 
-    def string_assertions(self) -> dict[str, Any]:
-        return {
-            keyword: self.values[keyword]
-            for keyword in ("pattern", "format", "minLength", "maxLength")
-            if keyword in self.values
-        }
+    @property
+    def numeric(self) -> NumericView:
+        return NumericView(
+            may_apply=self._may_apply_to("integer", "number"),
+            has_multiple_of="multipleOf" in self.values,
+        )
 
-    def add_subschema(self, keyword: str, child: "SchemaNode") -> None:
+    @property
+    def string(self) -> StringView:
+        return StringView(
+            may_apply=self._may_apply_to("string"),
+            has_pattern="pattern" in self.values,
+            has_format="format" in self.values,
+            format=self.values.get("format"),
+            has_length_bounds="minLength" in self.values or "maxLength" in self.values,
+        )
+
+    @property
+    def array(self) -> ArrayView:
+        return ArrayView(
+            may_apply=self._may_apply_to("array"),
+            has_unique_items="uniqueItems" in self.values,
+            contains=self.subschemas.get("contains"),
+            has_min_contains="minContains" in self.values,
+            has_max_contains="maxContains" in self.values,
+        )
+
+    @property
+    def object(self) -> ObjectView:
+        return ObjectView(
+            may_apply=self._may_apply_to("object"),
+            properties=self.subschemas.get("properties"),
+            pattern_properties=self.subschemas.get("patternProperties"),
+            property_names=self.subschemas.get("propertyNames"),
+            additional_properties=self.subschemas.get("additionalProperties"),
+            unevaluated_properties=self.subschemas.get("unevaluatedProperties"),
+        )
+
+    def add_subschema(self, keyword: str, child: SchemaNode) -> None:
         if self.has_keyword(keyword):
             raise ValueError(f"{keyword} already exists")
         self.subschemas[keyword] = child
@@ -145,7 +212,7 @@ class SchemaDocument:
     application_edges: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
-    def parse(cls, raw: Any, dialect: str = "2020-12") -> "SchemaDocument":
+    def parse(cls, raw: Any, dialect: str = "2020-12") -> SchemaDocument:
         if dialect != "2020-12":
             raise IncompleteSchemaAnalysis(f"unsupported dialect: {dialect}")
         document = cls(_parse_node(raw), dialect)
@@ -223,7 +290,7 @@ class SchemaDocument:
 
     def transform_schema_nodes(
         self, transform: Callable[[GeneralSchema], None]
-    ) -> "SchemaDocument":
+    ) -> SchemaDocument:
         prepared = deepcopy(self)
         for node in list(prepared.nodes.values()):
             if isinstance(node, GeneralSchema):
