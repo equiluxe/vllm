@@ -78,21 +78,37 @@ def test_guidance_rewrite_closes_only_schema_objects():
     assert prepared["$defs"]["Child"]["additionalProperties"] is False
 
 
-def test_type_views_do_not_insert_a_type():
+def test_type_behaviors_share_the_node_without_inserting_a_type():
     schema = {"pattern": "^[a-z]+$", "maxLength": 3}
     document = SchemaDocument.parse(schema)
     root = document.root
 
     assert isinstance(root, GeneralSchema)
     assert root.explicit_types() is None
-    assert root.string.may_apply
-    assert root.string.has_pattern
-    assert root.string.has_length_bounds
+    assert root.may_be_string
+    assert root.has_pattern_or_format_with_length_bounds
     assert document.export() == schema
     integer_root = SchemaDocument.parse({"type": "integer"}).root
     assert isinstance(integer_root, GeneralSchema)
-    assert integer_root.numeric.may_apply
-    assert not integer_root.string.may_apply
+    assert integer_root.may_be_numeric
+    assert not integer_root.may_be_string
+
+
+def test_type_behavior_cache_is_refreshed_after_transformation():
+    document = SchemaDocument.parse({"type": "string"})
+    root = document.root
+    assert isinstance(root, GeneralSchema)
+    assert root.may_be_string
+
+    def replace_type(node: GeneralSchema) -> None:
+        node.values["type"] = "integer"
+
+    prepared = document.transform_schema_nodes(replace_type)
+    prepared_root = prepared.root
+    assert isinstance(prepared_root, GeneralSchema)
+    assert prepared_root.may_be_numeric
+    assert not prepared_root.may_be_string
+    assert document.export() == {"type": "string"}
 
 
 @pytest.mark.parametrize(
@@ -106,7 +122,7 @@ def test_type_views_do_not_insert_a_type():
         {"propertyNames": {"pattern": "^a$", "maxLength": 1}},
     ],
 )
-def test_xgrammar_check_uses_type_views_for_applicable_constraints(schema):
+def test_xgrammar_check_uses_node_behaviors_for_applicable_constraints(schema):
     assert has_xgrammar_unsupported_json_features(schema)
 
 

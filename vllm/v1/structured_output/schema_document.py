@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, TypeAlias
 from urllib.parse import unquote
 
@@ -21,42 +22,10 @@ class BoolSchema:
     value: bool
 
 
-@dataclass(frozen=True)
-class NumericView:
-    may_apply: bool
-    has_multiple_of: bool
-
-
-@dataclass(frozen=True)
-class StringView:
-    may_apply: bool
-    has_pattern: bool
-    has_format: bool
-    format: Any
-    has_length_bounds: bool
-
-
-@dataclass(frozen=True)
-class ArrayView:
-    may_apply: bool
-    has_unique_items: bool
-    contains: SchemaNode | None
-    has_min_contains: bool
-    has_max_contains: bool
-
-
-@dataclass(frozen=True)
-class ObjectView:
-    may_apply: bool
-    properties: dict[str, SchemaNode] | None
-    pattern_properties: dict[str, SchemaNode] | None
-    property_names: SchemaNode | None
-    additional_properties: SchemaNode | None
-    unevaluated_properties: SchemaNode | None
-
-
 @dataclass
 class GeneralSchema:
+    """One schema node with typed behavior over shared keyword data."""
+
     values: dict[str, Any]
     subschemas: dict[str, Any]
     order: tuple[str, ...]
@@ -64,59 +33,95 @@ class GeneralSchema:
     def has_keyword(self, keyword: str) -> bool:
         return keyword in self.values or keyword in self.subschemas
 
-    def explicit_types(self) -> set[str] | None:
+    @cached_property
+    def _explicit_types(self) -> frozenset[str] | None:
         schema_type = self.values.get("type")
         if schema_type is None:
             return None
         if isinstance(schema_type, str):
-            return {schema_type}
+            return frozenset({schema_type})
         if isinstance(schema_type, list) and all(
             isinstance(value, str) for value in schema_type
         ):
-            return set(schema_type)
+            return frozenset(schema_type)
         raise IncompleteSchemaAnalysis("invalid type keyword")
 
-    def _may_apply_to(self, *types_to_check: str) -> bool:
-        types = self.explicit_types()
-        return types is None or bool(types.intersection(types_to_check))
+    def explicit_types(self) -> frozenset[str] | None:
+        return self._explicit_types
 
     @property
-    def numeric(self) -> NumericView:
-        return NumericView(
-            may_apply=self._may_apply_to("integer", "number"),
-            has_multiple_of="multipleOf" in self.values,
+    def may_be_numeric(self) -> bool:
+        types = self._explicit_types
+        return types is None or "integer" in types or "number" in types
+
+    @property
+    def may_be_string(self) -> bool:
+        types = self._explicit_types
+        return types is None or "string" in types
+
+    @property
+    def may_be_array(self) -> bool:
+        types = self._explicit_types
+        return types is None or "array" in types
+
+    @property
+    def may_be_object(self) -> bool:
+        types = self._explicit_types
+        return types is None or "object" in types
+
+    @property
+    def has_multiple_of(self) -> bool:
+        return "multipleOf" in self.values
+
+    @property
+    def has_format(self) -> bool:
+        return "format" in self.values
+
+    @property
+    def string_format(self) -> Any:
+        return self.values.get("format")
+
+    @property
+    def has_pattern_or_format_with_length_bounds(self) -> bool:
+        return ("pattern" in self.values or "format" in self.values) and (
+            "minLength" in self.values or "maxLength" in self.values
         )
 
     @property
-    def string(self) -> StringView:
-        return StringView(
-            may_apply=self._may_apply_to("string"),
-            has_pattern="pattern" in self.values,
-            has_format="format" in self.values,
-            format=self.values.get("format"),
-            has_length_bounds="minLength" in self.values or "maxLength" in self.values,
-        )
+    def has_unique_items(self) -> bool:
+        return "uniqueItems" in self.values
 
     @property
-    def array(self) -> ArrayView:
-        return ArrayView(
-            may_apply=self._may_apply_to("array"),
-            has_unique_items="uniqueItems" in self.values,
-            contains=self.subschemas.get("contains"),
-            has_min_contains="minContains" in self.values,
-            has_max_contains="maxContains" in self.values,
-        )
+    def contains(self) -> SchemaNode | None:
+        return self.subschemas.get("contains")
 
     @property
-    def object(self) -> ObjectView:
-        return ObjectView(
-            may_apply=self._may_apply_to("object"),
-            properties=self.subschemas.get("properties"),
-            pattern_properties=self.subschemas.get("patternProperties"),
-            property_names=self.subschemas.get("propertyNames"),
-            additional_properties=self.subschemas.get("additionalProperties"),
-            unevaluated_properties=self.subschemas.get("unevaluatedProperties"),
-        )
+    def has_min_contains(self) -> bool:
+        return "minContains" in self.values
+
+    @property
+    def has_max_contains(self) -> bool:
+        return "maxContains" in self.values
+
+    @property
+    def properties(self) -> dict[str, SchemaNode] | None:
+        return self.subschemas.get("properties")
+
+    @property
+    def pattern_properties(self) -> dict[str, SchemaNode] | None:
+        return self.subschemas.get("patternProperties")
+
+    @property
+    def property_names(self) -> SchemaNode | None:
+        return self.subschemas.get("propertyNames")
+
+    @property
+    def additional_properties(self) -> SchemaNode | None:
+        return self.subschemas.get("additionalProperties")
+
+    @property
+    def unevaluated_properties(self) -> SchemaNode | None:
+        return self.subschemas.get("unevaluatedProperties")
 
     def add_subschema(self, keyword: str, child: SchemaNode) -> None:
         if self.has_keyword(keyword):
@@ -295,5 +300,6 @@ class SchemaDocument:
         for node in list(prepared.nodes.values()):
             if isinstance(node, GeneralSchema):
                 transform(node)
+                node.__dict__.pop("_explicit_types", None)
         prepared._index()
         return prepared

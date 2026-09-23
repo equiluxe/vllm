@@ -245,29 +245,24 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
     def check_object(node: GeneralSchema) -> bool:
-        numeric = node.numeric
-        string = node.string
-        array = node.array
-        object_view = node.object
-
         # Check for numeric ranges
-        if numeric.may_apply and numeric.has_multiple_of:
+        if node.may_be_numeric and node.has_multiple_of:
             return True
 
         # Check for array unsupported keywords
-        if array.may_apply and (
-            array.has_unique_items
-            or array.contains is not None
-            or array.has_min_contains
-            or array.has_max_contains
+        if node.may_be_array and (
+            node.has_unique_items
+            or node.contains is not None
+            or node.has_min_contains
+            or node.has_max_contains
         ):
             return True
 
         # Unsupported keywords for strings
         if (
-            string.may_apply
-            and string.has_format
-            and string.format not in STRING_SUPPORTED_FORMATS
+            node.may_be_string
+            and node.has_format
+            and node.string_format not in STRING_SUPPORTED_FORMATS
         ):
             return True
 
@@ -278,34 +273,29 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
-        if (
-            string.may_apply
-            and (string.has_pattern or string.has_format)
-            and string.has_length_bounds
-        ):
+        if node.may_be_string and node.has_pattern_or_format_with_length_bounds:
             return True
 
         # propertyNames validates names, so its schema may omit "type".
-        property_names = object_view.property_names
+        property_names = node.property_names
         if (
-            object_view.may_apply
+            node.may_be_object
             and isinstance(property_names, GeneralSchema)
-            and (property_names.string.has_pattern or property_names.string.has_format)
-            and property_names.string.has_length_bounds
+            and property_names.has_pattern_or_format_with_length_bounds
         ):
             return True
 
         # FIXME: propertyNames conflicts with properties/patternProperties/
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
-        additional_properties = object_view.additional_properties
-        unevaluated_properties = object_view.unevaluated_properties
+        additional_properties = node.additional_properties
+        unevaluated_properties = node.unevaluated_properties
         if (
-            object_view.may_apply
+            node.may_be_object
             and property_names is not None
             and (
-                object_view.properties is not None
-                or object_view.pattern_properties is not None
+                node.properties is not None
+                or node.pattern_properties is not None
                 or isinstance(additional_properties, GeneralSchema)
                 or (
                     unevaluated_properties is not None
@@ -320,11 +310,11 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # FIXME: multiple patternProperties, or patternProperties alongside
         # properties, conflict under xgrammar.
-        pattern_properties = object_view.pattern_properties
+        pattern_properties = node.pattern_properties
         return (
-            object_view.may_apply
+            node.may_be_object
             and pattern_properties is not None
-            and (object_view.properties is not None or len(pattern_properties) > 1)
+            and (node.properties is not None or len(pattern_properties) > 1)
         )
 
     document = SchemaDocument.parse(schema)
