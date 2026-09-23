@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 import json
 import os
 from dataclasses import dataclass
@@ -20,6 +19,11 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.schema_document import (
+    BoolSchema,
+    GeneralSchema,
+    SchemaDocument,
+)
 from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
@@ -34,43 +38,13 @@ else:
 logger = init_logger(__name__)
 
 
-def _walk_json_for_additional_properties(data: object):
-    if isinstance(data, dict):
-        for value in data.values():
-            _walk_json_for_additional_properties(value)
-        if "additionalProperties" not in data and (
-            "properties" in data or "patternProperties" in data
-        ):
-            data["additionalProperties"] = False
-    elif isinstance(data, list):
-        for item in data:
-            _walk_json_for_additional_properties(item)
-
-
 def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by guidance/llguidance."""
-
-    def check_object(obj: dict[str, Any]) -> bool:
-        if not isinstance(obj, dict):
-            return False
-
-        # patternProperties is not supported by llguidance
-        if "patternProperties" in obj:
-            return True
-
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
-
-        return False
-
-    return check_object(schema)
+    document = SchemaDocument.parse(schema)
+    return any(
+        isinstance(node, GeneralSchema) and node.has_keyword("patternProperties")
+        for _, node in document.walk_potential_constraints()
+    )
 
 
 def process_for_additional_properties(
@@ -79,10 +53,16 @@ def process_for_additional_properties(
     if isinstance(guide_json, str):
         guide_json_obj = json.loads(guide_json)
     else:
-        # copy for modifications
-        guide_json_obj = copy.deepcopy(guide_json)
-    _walk_json_for_additional_properties(guide_json_obj)
-    return guide_json_obj
+        guide_json_obj = guide_json
+
+    def close_object_schema(node: GeneralSchema) -> None:
+        if not node.has_keyword("additionalProperties") and (
+            "properties" in node.subschemas or "patternProperties" in node.subschemas
+        ):
+            node.add_subschema("additionalProperties", BoolSchema(False))
+
+    document = SchemaDocument.parse(guide_json_obj)
+    return document.transform_schema_nodes(close_object_schema).export()
 
 
 @dataclass
