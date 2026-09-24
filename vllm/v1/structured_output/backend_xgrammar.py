@@ -320,7 +320,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     document = SchemaDocument.parse(schema)
     return any(
         check_object(node)
-        for _, node in document.walk_potential_constraints()
+        for node in document.walk_potential_constraint_nodes()
         if isinstance(node, GeneralSchema)
     )
 

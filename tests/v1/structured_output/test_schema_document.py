@@ -45,6 +45,36 @@ def test_document_preserves_schema_positions_and_literal_data():
     }
 
 
+def test_mutable_literals_are_copied_on_parse_and_export():
+    schema = {"const": {"items": [1]}}
+    document = SchemaDocument.parse(schema)
+
+    schema["const"]["items"].append(2)
+    exported = document.export()
+    assert exported == {"const": {"items": [1]}}
+    exported["const"]["items"].append(3)
+    assert document.export() == {"const": {"items": [1]}}
+
+
+def test_node_walk_builds_pointer_index_only_for_references():
+    plain = SchemaDocument.parse({"properties": {"name": {"type": "string"}}})
+    assert plain._node_index is None
+    assert len(list(plain.walk_potential_constraint_nodes())) == 2
+    assert plain._node_index is None
+
+    referenced = SchemaDocument.parse(
+        {"$defs": {"Name": {"type": "string"}}, "$ref": "#/$defs/Name"}
+    )
+    assert referenced._node_index is None
+    assert len(list(referenced.walk_potential_constraint_nodes())) == 2
+    assert referenced._node_index is not None
+
+
+def test_schema_map_names_are_validated_before_lazy_indexing():
+    with pytest.raises(ValueError, match="properties names must be strings"):
+        SchemaDocument.parse({"properties": {1: True}})
+
+
 def test_guidance_check_uses_schema_keywords_and_reachable_references():
     data_only = {
         "properties": {"patternProperties": {"type": "string"}},

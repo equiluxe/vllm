@@ -43,7 +43,7 @@ def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
     document = SchemaDocument.parse(schema)
     return any(
         isinstance(node, GeneralSchema) and node.pattern_properties is not None
-        for _, node in document.walk_potential_constraints()
+        for node in document.walk_potential_constraint_nodes()
     )
 
 

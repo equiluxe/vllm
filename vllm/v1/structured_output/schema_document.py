@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -155,23 +155,32 @@ _SCHEMA_SINGLE = frozenset(
 _DEFINITION_CONTAINERS = frozenset({"$defs", "definitions"})
 
 
+def _copy_value(value: Any) -> Any:
+    if type(value) in (str, int, float, bool, type(None)):
+        return value
+    return deepcopy(value)
+
+
 def _parse_node(raw: Any) -> SchemaNode:
     if isinstance(raw, bool):
         return BoolSchema(raw)
     if not isinstance(raw, dict):
         raise ValueError("a JSON Schema must be an object or boolean")
-    if any(not isinstance(keyword, str) for keyword in raw):
-        raise ValueError("JSON Schema keywords must be strings")
 
     values: dict[str, Any] = {}
     subschemas: dict[str, Any] = {}
     for keyword, value in raw.items():
+        if not isinstance(keyword, str):
+            raise ValueError("JSON Schema keywords must be strings")
         if keyword in _SCHEMA_MAP:
             if not isinstance(value, dict):
                 raise ValueError(f"{keyword} must be a schema map")
-            subschemas[keyword] = {
-                name: _parse_node(child) for name, child in value.items()
-            }
+            parsed_children: dict[str, SchemaNode] = {}
+            for name, child in value.items():
+                if not isinstance(name, str):
+                    raise ValueError(f"{keyword} names must be strings")
+                parsed_children[name] = _parse_node(child)
+            subschemas[keyword] = parsed_children
         elif keyword in _SCHEMA_ARRAY or (
             keyword == "items" and isinstance(value, list)
         ):
@@ -181,7 +190,7 @@ def _parse_node(raw: Any) -> SchemaNode:
         elif keyword in _SCHEMA_SINGLE:
             subschemas[keyword] = _parse_node(value)
         else:
-            values[keyword] = deepcopy(value)
+            values[keyword] = _copy_value(value)
     return GeneralSchema(values, subschemas, tuple(raw))
 
 
@@ -191,7 +200,7 @@ def _export_node(node: SchemaNode) -> Any:
     exported: dict[str, Any] = {}
     for keyword in node.order:
         if keyword in node.values:
-            exported[keyword] = deepcopy(node.values[keyword])
+            exported[keyword] = _copy_value(node.values[keyword])
         else:
             children = node.subschemas[keyword]
             if isinstance(children, dict):
@@ -209,51 +218,104 @@ def _pointer_part(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
+def _schema_children(
+    node: GeneralSchema, *, include_definitions: bool
+) -> Iterator[tuple[str, str | int | None, SchemaNode]]:
+    for keyword, children in node.subschemas.items():
+        if not include_definitions and keyword in _DEFINITION_CONTAINERS:
+            continue
+        if isinstance(children, dict):
+            for name, child in children.items():
+                yield keyword, name, child
+        elif isinstance(children, list):
+            for index, child in enumerate(children):
+                yield keyword, index, child
+        else:
+            yield keyword, None, children
+
+
+def _child_pointer(pointer: str, keyword: str, name: str | int | None) -> str:
+    child_pointer = f"{pointer}/{_pointer_part(keyword)}"
+    if name is not None:
+        child_pointer += f"/{_pointer_part(name) if isinstance(name, str) else name}"
+    return child_pointer
+
+
+def _push_children(
+    pending: list[SchemaNode], node: GeneralSchema, *, include_definitions: bool
+) -> None:
+    for keyword in reversed(node.subschemas):
+        if not include_definitions and keyword in _DEFINITION_CONTAINERS:
+            continue
+        children = node.subschemas[keyword]
+        if isinstance(children, dict):
+            pending.extend(reversed(children.values()))
+        elif isinstance(children, list):
+            pending.extend(reversed(children))
+        else:
+            pending.append(children)
+
+
 @dataclass
 class SchemaDocument:
     root: SchemaNode
     dialect: str = "2020-12"
-    nodes: dict[str, SchemaNode] = field(default_factory=dict)
-    application_edges: dict[str, list[str]] = field(default_factory=dict)
+    _node_index: dict[str, SchemaNode] | None = field(
+        default=None, init=False, repr=False
+    )
 
     @classmethod
     def parse(cls, raw: Any, dialect: str = "2020-12") -> SchemaDocument:
         if dialect != "2020-12":
             raise IncompleteSchemaAnalysis(f"unsupported dialect: {dialect}")
-        document = cls(_parse_node(raw), dialect)
-        document._index()
-        return document
+        return cls(_parse_node(raw), dialect)
 
-    def _index(self) -> None:
-        self.nodes = {}
-        self.application_edges = {}
+    @property
+    def nodes(self) -> dict[str, SchemaNode]:
+        if self._node_index is None:
+            index: dict[str, SchemaNode] = {}
 
-        def visit(pointer: str, node: SchemaNode) -> None:
-            self.nodes[pointer] = node
-            self.application_edges[pointer] = []
-            if isinstance(node, BoolSchema):
-                return
-            for keyword, children in node.subschemas.items():
-                prefix = f"{pointer}/{_pointer_part(keyword)}"
-                child_nodes: Iterable[tuple[str, SchemaNode]]
-                if isinstance(children, dict):
-                    child_nodes = (
-                        (f"{prefix}/{_pointer_part(name)}", child)
-                        for name, child in children.items()
-                    )
-                elif isinstance(children, list):
-                    child_nodes = (
-                        (f"{prefix}/{index}", child)
-                        for index, child in enumerate(children)
-                    )
-                else:
-                    child_nodes = ((prefix, children),)
-                for child_pointer, child in child_nodes:
-                    visit(child_pointer, child)
-                    if keyword not in _DEFINITION_CONTAINERS:
-                        self.application_edges[pointer].append(child_pointer)
+            def visit(pointer: str, node: SchemaNode) -> None:
+                index[pointer] = node
+                if isinstance(node, BoolSchema):
+                    return
+                for keyword, children in node.subschemas.items():
+                    prefix = f"{pointer}/{_pointer_part(keyword)}"
+                    if isinstance(children, dict):
+                        for name, child in children.items():
+                            visit(f"{prefix}/{_pointer_part(name)}", child)
+                    elif isinstance(children, list):
+                        for child_index, child in enumerate(children):
+                            visit(f"{prefix}/{child_index}", child)
+                    else:
+                        visit(prefix, children)
 
-        visit("", self.root)
+            visit("", self.root)
+            self._node_index = index
+        return self._node_index
+
+    def _local_reference(self, node: GeneralSchema) -> str | None:
+        values = node.values
+        if (
+            "$id" in values
+            or "$anchor" in values
+            or "$dynamicAnchor" in values
+            or "dependencies" in values
+        ):
+            raise IncompleteSchemaAnalysis(
+                "resource scope, anchors, or legacy dependencies unresolved"
+            )
+        if "$dynamicRef" in values or "$recursiveRef" in values:
+            raise IncompleteSchemaAnalysis("dynamic references are unresolved")
+        ref = values.get("$ref")
+        if ref is None:
+            return None
+        if not isinstance(ref, str) or not ref.startswith("#"):
+            raise IncompleteSchemaAnalysis("only local references are resolved")
+        target = unquote(ref[1:])
+        if target not in self.nodes:
+            raise IncompleteSchemaAnalysis(f"unresolved reference: {ref}")
+        return target
 
     def export(self) -> Any:
         return _export_node(self.root)
@@ -261,45 +323,55 @@ class SchemaDocument:
     def walk_all_schema_nodes(self) -> Iterator[tuple[str, SchemaNode]]:
         yield from self.nodes.items()
 
+    def walk_potential_constraint_nodes(self) -> Iterator[SchemaNode]:
+        """Visit applicable nodes without building pointers unless a ref needs them."""
+        pending = [self.root]
+        visited: set[int] = set()
+        while pending:
+            node = pending.pop()
+            if id(node) in visited:
+                continue
+            visited.add(id(node))
+            yield node
+            if isinstance(node, GeneralSchema):
+                _push_children(pending, node, include_definitions=False)
+                target = self._local_reference(node)
+                if target is not None:
+                    pending.append(self.nodes[target])
+
     def walk_potential_constraints(self) -> Iterator[tuple[str, SchemaNode]]:
-        pending = [""]
+        pending = [("", self.root)]
         visited: set[str] = set()
         while pending:
-            pointer = pending.pop()
+            pointer, node = pending.pop()
             if pointer in visited:
                 continue
             visited.add(pointer)
-            node = self.nodes[pointer]
             yield pointer, node
-            pending.extend(reversed(self.application_edges[pointer]))
             if isinstance(node, GeneralSchema):
-                if any(
-                    keyword in node.values
-                    for keyword in ("$id", "$anchor", "$dynamicAnchor", "dependencies")
-                ):
-                    raise IncompleteSchemaAnalysis(
-                        "resource scope, anchors, or legacy dependencies unresolved"
+                children = [
+                    (_child_pointer(pointer, keyword, name), child)
+                    for keyword, name, child in _schema_children(
+                        node, include_definitions=False
                     )
-                if "$dynamicRef" in node.values or "$recursiveRef" in node.values:
-                    raise IncompleteSchemaAnalysis("dynamic references are unresolved")
-                ref = node.values.get("$ref")
-                if ref is not None:
-                    if not isinstance(ref, str) or not ref.startswith("#"):
-                        raise IncompleteSchemaAnalysis(
-                            "only local references are resolved"
-                        )
-                    target = unquote(ref[1:])
-                    if target not in self.nodes:
-                        raise IncompleteSchemaAnalysis(f"unresolved reference: {ref}")
-                    pending.append(target)
+                ]
+                pending.extend(reversed(children))
+                target = self._local_reference(node)
+                if target is not None:
+                    pending.append((target, self.nodes[target]))
 
     def transform_schema_nodes(
         self, transform: Callable[[GeneralSchema], None]
     ) -> SchemaDocument:
-        prepared = deepcopy(self)
-        for node in list(prepared.nodes.values()):
+        prepared = SchemaDocument(deepcopy(self.root), self.dialect)
+        pending = [prepared.root]
+        nodes: list[GeneralSchema] = []
+        while pending:
+            node = pending.pop()
             if isinstance(node, GeneralSchema):
-                transform(node)
-                node.__dict__.pop("_explicit_types", None)
-        prepared._index()
+                nodes.append(node)
+                _push_children(pending, node, include_definitions=True)
+        for node in nodes:
+            transform(node)
+            node.__dict__.pop("_explicit_types", None)
         return prepared
