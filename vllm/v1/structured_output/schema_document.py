@@ -14,7 +14,11 @@ from urllib.parse import unquote
 
 
 class IncompleteSchemaAnalysis(Exception):
-    """A schema feature needs resolution beyond this prototype's coverage."""
+    """Schema analysis exceeds this prototype's coverage.
+
+    The target routing contract reports this separately from known unsupported
+    features. This prototype raises instead of implementing that policy.
+    """
 
 
 @dataclass
@@ -24,7 +28,12 @@ class BoolSchema:
 
 @dataclass
 class GeneralSchema:
-    """One schema node with typed behavior over shared keyword data."""
+    """One node owns keyword data and schema children, with no second raw tree.
+
+    ``order`` preserves keyword order for lossless export. Type-specific behavior
+    is derived here instead of allocating separate numeric/string/array/object
+    views.
+    """
 
     values: dict[str, Any]
     subschemas: dict[str, Any]
@@ -35,6 +44,8 @@ class GeneralSchema:
 
     @cached_property
     def _explicit_types(self) -> frozenset[str] | None:
+        # An omitted type still allows type-specific assertions to constrain
+        # matching instances; it must not be rewritten as an inferred type.
         schema_type = self.values.get("type")
         if schema_type is None:
             return None
@@ -132,6 +143,9 @@ class GeneralSchema:
 
 SchemaNode: TypeAlias = BoolSchema | GeneralSchema
 
+# Only these prototype 2020-12 keywords contain schemas. Map keys such as a
+# property named "patternProperties" are names, not schema keywords. Unknown
+# keywords and literal const/enum/default values stay opaque and round-trip.
 _SCHEMA_MAP = frozenset(
     {"$defs", "definitions", "properties", "patternProperties", "dependentSchemas"}
 )
@@ -173,6 +187,8 @@ def _parse_node(raw: Any) -> SchemaNode:
         if not isinstance(keyword, str):
             raise ValueError("JSON Schema keywords must be strings")
         if keyword in _SCHEMA_MAP:
+            # Reject malformed schema containers instead of silently treating
+            # them as absent. Literal JSON values never enter this branch.
             if not isinstance(value, dict):
                 raise ValueError(f"{keyword} must be a schema map")
             parsed_children: dict[str, SchemaNode] = {}
@@ -266,12 +282,14 @@ class SchemaDocument:
 
     @classmethod
     def parse(cls, raw: Any, dialect: str = "2020-12") -> SchemaDocument:
+        """Parse known structure without performing full schema validation."""
         if dialect != "2020-12":
             raise IncompleteSchemaAnalysis(f"unsupported dialect: {dialect}")
         return cls(_parse_node(raw), dialect)
 
     @property
     def nodes(self) -> dict[str, SchemaNode]:
+        """Build source locations only for references or diagnostic inspection."""
         if self._node_index is None:
             index: dict[str, SchemaNode] = {}
 
@@ -295,6 +313,9 @@ class SchemaDocument:
         return self._node_index
 
     def _local_reference(self, node: GeneralSchema) -> str | None:
+        # The demo resolves only root-local JSON Pointers. Resource scopes,
+        # anchors, remote references, and legacy dependencies need a resolver
+        # before capability checks can claim a complete answer.
         values = node.values
         if (
             "$id" in values
@@ -318,13 +339,19 @@ class SchemaDocument:
         return target
 
     def export(self) -> Any:
+        """Rebuild the JSON value from nodes without a mutable raw twin."""
         return _export_node(self.root)
 
     def walk_all_schema_nodes(self) -> Iterator[tuple[str, SchemaNode]]:
+        """Inspect every schema node, including unreferenced definitions."""
         yield from self.nodes.items()
 
     def walk_potential_constraint_nodes(self) -> Iterator[SchemaNode]:
-        """Visit applicable nodes without building pointers unless a ref needs them."""
+        """Follow application edges and refs, skipping unused definitions.
+
+        Reachability is conservative, not a satisfiability proof. The pointer
+        index stays unbuilt unless a reference needs resolution.
+        """
         pending = [self.root]
         visited: set[int] = set()
         while pending:
@@ -340,6 +367,7 @@ class SchemaDocument:
                     pending.append(self.nodes[target])
 
     def walk_potential_constraints(self) -> Iterator[tuple[str, SchemaNode]]:
+        """Yield source pointers such as ``#/properties/code`` for diagnostics."""
         pending = [("", self.root)]
         visited: set[str] = set()
         while pending:
@@ -363,6 +391,11 @@ class SchemaDocument:
     def transform_schema_nodes(
         self, transform: Callable[[GeneralSchema], None]
     ) -> SchemaDocument:
+        """Prepare a new document without changing input or literal JSON data.
+
+        Visit all schema nodes, including definitions that a ref may reach.
+        Backend validation and compilation must use this prepared export.
+        """
         prepared = SchemaDocument(deepcopy(self.root), self.dialect)
         pending = [prepared.root]
         nodes: list[GeneralSchema] = []

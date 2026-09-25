@@ -242,7 +242,11 @@ STRING_SUPPORTED_FORMATS = {
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
-    """Check if JSON schema contains features unsupported by xgrammar."""
+    """Gate known xgrammar gaps; False is not proof of complete support.
+
+    The target routing contract also carries a reason, schema location, and
+    separate analysis-incomplete outcome. This demo retains the boolean API.
+    """
 
     def check_object(node: GeneralSchema) -> bool:
         # Check for numeric ranges

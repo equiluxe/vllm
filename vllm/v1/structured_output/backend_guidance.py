@@ -39,7 +39,11 @@ logger = init_logger(__name__)
 
 
 def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
-    """Check if JSON schema contains features unsupported by guidance/llguidance."""
+    """Gate known llguidance gaps; False is not proof of complete support.
+
+    The target routing contract also carries a reason, schema location, and
+    separate analysis-incomplete outcome. This demo retains the boolean API.
+    """
     document = SchemaDocument.parse(schema)
     return any(
         isinstance(node, GeneralSchema) and node.pattern_properties is not None
@@ -56,6 +60,8 @@ def process_for_additional_properties(
         guide_json_obj = guide_json
 
     def close_object_schema(node: GeneralSchema) -> None:
+        # Only real object schemas receive this configured restriction;
+        # a "properties" key inside const/enum is ordinary JSON data.
         if node.additional_properties is None and (
             node.properties is not None or node.pattern_properties is not None
         ):
