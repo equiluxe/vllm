@@ -18,6 +18,11 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
     StructuredOutputOptions,
 )
+from vllm.v1.structured_output.schema_document import (
+    BoolSchema,
+    GeneralSchema,
+    SchemaDocument,
+)
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
@@ -236,49 +241,32 @@ STRING_SUPPORTED_FORMATS = {
 }
 
 
-def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
-    return ("pattern" in schema or "format" in schema) and (
-        "minLength" in schema or "maxLength" in schema
-    )
-
-
-# FIXME(arpera): The approach used here needs to be redesigned because of
-# existing bugs: https://github.com/vllm-project/vllm/issues/57550
-def _schema_types(schema: dict[str, Any]) -> set[str]:
-    """Normalize a scalar or list-valued JSON Schema type."""
-    schema_type = schema.get("type")
-    if isinstance(schema_type, str):
-        return {schema_type}
-    if isinstance(schema_type, list):
-        return {item for item in schema_type if isinstance(item, str)}
-    return set()
-
-
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
-    """Check if JSON schema contains features unsupported by xgrammar."""
+    """Gate known xgrammar gaps; False is not proof of complete support.
 
-    def check_object(obj: dict[str, Any]) -> bool:
-        if not isinstance(obj, dict):
-            return False
+    The target routing contract also carries a reason, schema location, and
+    separate analysis-incomplete outcome. This demo retains the boolean API.
+    """
 
-        schema_types = _schema_types(obj)
-
+    def check_object(node: GeneralSchema) -> bool:
         # Check for numeric ranges
-        if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
+        if node.may_be_numeric and node.has_multiple_of:
             return True
 
         # Check for array unsupported keywords
-        if "array" in schema_types and any(
-            key in obj
-            for key in ("uniqueItems", "contains", "minContains", "maxContains")
+        if node.may_be_array and (
+            node.has_unique_items
+            or node.contains is not None
+            or node.has_min_contains
+            or node.has_max_contains
         ):
             return True
 
         # Unsupported keywords for strings
         if (
-            "string" in schema_types
-            and "format" in obj
-            and obj["format"] not in STRING_SUPPORTED_FORMATS
+            node.may_be_string
+            and node.has_format
+            and node.string_format not in STRING_SUPPORTED_FORMATS
         ):
             return True
 
@@ -289,55 +277,56 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
-        if "string" in schema_types and _has_pattern_and_length_bounds(obj):
+        if node.may_be_string and node.has_pattern_or_format_with_length_bounds:
             return True
 
-        # propertyNames validates names, so it is a string schema even when it
-        # omits "type", which is the form that escapes the check above.
+        # propertyNames validates names, so its schema may omit "type".
+        property_names = node.property_names
         if (
-            "object" in schema_types
-            and isinstance(obj.get("propertyNames"), dict)
-            and _has_pattern_and_length_bounds(obj["propertyNames"])
+            node.may_be_object
+            and isinstance(property_names, GeneralSchema)
+            and property_names.has_pattern_or_format_with_length_bounds
         ):
             return True
 
         # FIXME: propertyNames conflicts with properties/patternProperties/
         # additionalProperties/unevaluatedProperties under xgrammar.
         # https://github.com/mlc-ai/xgrammar/issues/826
+        additional_properties = node.additional_properties
+        unevaluated_properties = node.unevaluated_properties
         if (
-            "object" in schema_types
-            and "propertyNames" in obj
+            node.may_be_object
+            and property_names is not None
             and (
-                "properties" in obj
-                or "patternProperties" in obj
-                or isinstance(obj.get("additionalProperties"), dict)
-                or obj.get("unevaluatedProperties", True) is not True
+                node.properties is not None
+                or node.pattern_properties is not None
+                or isinstance(additional_properties, GeneralSchema)
+                or (
+                    unevaluated_properties is not None
+                    and not (
+                        isinstance(unevaluated_properties, BoolSchema)
+                        and unevaluated_properties.value
+                    )
+                )
             )
         ):
             return True
 
         # FIXME: multiple patternProperties, or patternProperties alongside
         # properties, conflict under xgrammar.
-        if (
-            "object" in schema_types
-            and isinstance(obj.get("patternProperties"), dict)
-            and ("properties" in obj or len(obj["patternProperties"]) > 1)
-        ):
-            return True
+        pattern_properties = node.pattern_properties
+        return (
+            node.may_be_object
+            and pattern_properties is not None
+            and (node.properties is not None or len(pattern_properties) > 1)
+        )
 
-        # Recursively check all nested objects and arrays
-        for value in obj.values():
-            if isinstance(value, dict):
-                if check_object(value):
-                    return True
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and check_object(item):
-                        return True
-
-        return False
-
-    return check_object(schema)
+    document = SchemaDocument.parse(schema)
+    return any(
+        check_object(node)
+        for node in document.walk_potential_constraint_nodes()
+        if isinstance(node, GeneralSchema)
+    )
 
 
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
